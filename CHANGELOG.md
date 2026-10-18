@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CI installs `numpy` so the Bark voice unit tests can build a fake audio buffer. The rest of the voice stack stays in `requirements-voice.txt`.
 - Message ingest no longer keeps only whatever arrived after a connector started. WhatsApp backfills the local history window, Telegram history can be imported from a Desktop `result.json` export (the Bot API cannot return history), and every provider message is stored under a stable id.
 - Re-running a backfill does not insert duplicates. Edits update the existing row and keep the original send time. Reads order by that time, not by ingest time.
 - Bridge chat ids no longer use Python's per-process `hash()`, which split one WhatsApp chat across new ids after every restart.
