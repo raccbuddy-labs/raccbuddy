@@ -99,6 +99,9 @@ services:
       - PYTHON_CORE_URL=http://app:8000
       # Must match API_SECRET_KEY set on the app service
       - API_SECRET_KEY=${API_SECRET_KEY:-}
+      - WHATSAPP_HISTORY_ENABLED=${WHATSAPP_HISTORY_ENABLED:-true}
+      - WHATSAPP_HISTORY_MAX_PER_CHAT=${WHATSAPP_HISTORY_MAX_PER_CHAT:-500}
+      - WHATSAPP_HISTORY_PAGE_SIZE=${WHATSAPP_HISTORY_PAGE_SIZE:-100}
     volumes:
       - wa-session:/app/.wwebjs_auth
     depends_on:

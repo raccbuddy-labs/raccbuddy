@@ -28,7 +28,7 @@ class TestChatHandler:
     @patch("src.handlers.chat.provider_supports_tools", return_value=False)
     @patch("src.handlers.chat.generate_chat", new_callable=AsyncMock)
     @patch("src.handlers.chat.context_builder.build_messages", new_callable=AsyncMock)
-    @patch("src.handlers.chat.save_message", new_callable=AsyncMock)
+    @patch("src.handlers.chat.persist_incoming", new_callable=AsyncMock)
     async def test_processes_message_and_replies(
         self,
         mock_save: AsyncMock,
@@ -56,21 +56,16 @@ class TestChatHandler:
         await chat_handler(update, MagicMock())
 
         # Owner direct message saved (first call), bot reply saved (second call)
-        assert mock_save.call_count == 2
-        # First call: user message
-        mock_save.assert_any_call(
-            platform="telegram",
-            chat_id=200,
-            from_contact_id=None,
-            text_content="Hello",
-        )
-        # Second call: bot reply
-        mock_save.assert_any_call(
-            platform="telegram",
-            chat_id=200,
-            text_content="Hey legend! 🦝",
-            is_bot_reply=True,
-        )
+        assert mock_save.await_count == 2
+        user_record = mock_save.await_args_list[0].args[0][0]
+        assert user_record.platform == "telegram"
+        assert user_record.external_chat_id == "200"
+        assert user_record.text == "Hello"
+        assert user_record.is_bot_reply is False
+        assert user_record.is_from_owner is True
+        reply_record = mock_save.await_args_list[1].args[0][0]
+        assert reply_record.text == "Hey legend! 🦝"
+        assert reply_record.is_bot_reply is True
         # build_messages called with owner, contact_id=None, text, system prompt
         mock_build.assert_called_once()
         mock_generate.assert_called_once()
@@ -106,7 +101,7 @@ class TestChatHandler:
     @patch("src.handlers.chat.provider_supports_tools", return_value=False)
     @patch("src.handlers.chat.generate_chat", new_callable=AsyncMock)
     @patch("src.handlers.chat.context_builder.build_messages", new_callable=AsyncMock)
-    @patch("src.handlers.chat.save_message", new_callable=AsyncMock)
+    @patch("src.handlers.chat.persist_incoming", new_callable=AsyncMock)
     async def test_llm_error_sends_fallback(
         self,
         mock_save: AsyncMock,
@@ -139,7 +134,7 @@ class TestChatHandler:
     @patch("src.handlers.chat.provider_supports_tools", return_value=False)
     @patch("src.handlers.chat.generate_chat", new_callable=AsyncMock)
     @patch("src.handlers.chat.context_builder.build_messages", new_callable=AsyncMock)
-    @patch("src.handlers.chat.save_message", new_callable=AsyncMock)
+    @patch("src.handlers.chat.persist_incoming", new_callable=AsyncMock)
     @patch("src.handlers.chat.upsert_contact", new_callable=AsyncMock)
     async def test_forwarded_message_extracts_contact(
         self,
@@ -183,12 +178,10 @@ class TestChatHandler:
         mock_upsert.assert_called_once()
         assert mock_upsert.call_args[1]["contact_handle"] == "999"
 
-        mock_save.assert_any_call(
-            platform="telegram",
-            chat_id=100,
-            from_contact_id=999,
-            text_content="Hey there",
-        )
+        user_record = mock_save.await_args_list[0].args[0][0]
+        assert user_record.text == "Hey there"
+        assert user_record.contact_id == 999
+        assert user_record.is_from_owner is False
         # build_messages called with the forwarded contact's DB ID
         mock_build.assert_called_once()
 

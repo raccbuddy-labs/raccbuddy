@@ -25,7 +25,6 @@ from telegram.ext import ContextTypes
 
 from src.core.auth import reject_non_owner
 from src.core.config import settings
-from src.core.db import save_message
 from src.core.llm import SYSTEM_PROMPT, generate_chat, provider_supports_tools
 from src.core.memory.context_builder import context_builder
 from src.core.skills.chat import (
@@ -34,6 +33,7 @@ from src.core.skills.chat import (
     run_pre_processors,
 )
 from src.core.state import get_state
+from src.core.sync.facade import persist_incoming
 from src.core.voice import voice_manager
 
 logger = logging.getLogger(__name__)
@@ -121,16 +121,30 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # 3. Show the transcription
         await processing_msg.edit_text(f"🎤 *You said:* {text}", parse_mode="Markdown")
 
-        # 4. Save the transcribed message
-        await save_message(
-            platform="telegram",
-            chat_id=chat_id,
-            text_content=text,
+        # 4. Save the transcribed message under the Telegram message id.
+        from src.handlers.chat import _telegram_external_id, _telegram_record
+
+        external_id = _telegram_external_id(update.message, chat_id, text)
+        ingested = await persist_incoming(
+            [
+                _telegram_record(
+                    update.message,
+                    chat_id=chat_id,
+                    text=text,
+                    external_message_id=external_id,
+                    is_from_owner=True,
+                    sender_handle=str(user_id),
+                )
+            ],
+            owner_id=owner,
         )
+        if ingested.is_replay is True:
+            logger.info("Ignoring redelivered voice message %s", external_id)
+            return
 
         # Update in-memory user state
         user_state = get_state(user_id)
-        user_state.last_active = datetime.datetime.now(datetime.timezone.utc)
+        user_state.last_active = datetime.datetime.now(datetime.UTC)
         user_state.message_count_today += 1
 
         # 5. Enrich (mood, etc.) — import here to avoid circular deps
@@ -160,11 +174,18 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         # 7. Save bot reply
         try:
-            await save_message(
-                platform="telegram",
-                chat_id=chat_id,
-                text_content=reply,
-                is_bot_reply=True,
+            await persist_incoming(
+                [
+                    _telegram_record(
+                        update.message,
+                        chat_id=chat_id,
+                        text=reply,
+                        external_message_id=f"reply:{external_id}",
+                        is_from_owner=True,
+                        is_bot_reply=True,
+                    )
+                ],
+                owner_id=owner,
             )
         except Exception:
             logger.warning("Failed to save bot reply", exc_info=True)

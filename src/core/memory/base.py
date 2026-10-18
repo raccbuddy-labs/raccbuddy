@@ -162,9 +162,14 @@ class PostgresMemory:
         importance: int = 5,
         category: str = "general",
         metadata: dict[str, Any] | None = None,
+        embedding: list[float] | None = None,
     ) -> SemanticMemory:
-        """Store a semantic memory with embedding."""
-        emb = await embed(content[:512])
+        """Store a semantic memory with embedding.
+
+        Pass ``embedding`` when the caller already computed one (history
+        catch-up does this) so a backfill does not embed the same text twice.
+        """
+        emb = embedding if embedding is not None else await embed(content[:512])
         mem = SemanticMemory(
             owner_id=owner_id,
             contact_id=contact_id,
@@ -282,7 +287,7 @@ class PostgresMemory:
             if merged:
                 merged.content = merged_content
                 merged.importance = merged_importance
-                merged.updated_at = _dt.datetime.now(_dt.timezone.utc)
+                merged.updated_at = _dt.datetime.now(_dt.UTC)
                 if new_metadata:
                     merged.metadata_ = {**(merged.metadata_ or {}), **new_metadata}
                 merged.embedding = await embed(merged_content[:512])
@@ -607,9 +612,7 @@ class PostgresMemory:
 
     async def prune_old_memories(self, *, days: int = 90) -> int:
         """Delete low-importance memories older than *days*."""
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
-            days=days
-        )
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
         deleted = 0
 
         async with get_session() as session:
@@ -652,7 +655,7 @@ class PostgresMemory:
         """Run daily reflection to extract lasting owner facts."""
         from src.core.llm.interface import generate as llm_generate
 
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
             hours=recent_hours
         )
 

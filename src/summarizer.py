@@ -50,7 +50,7 @@ async def summarize_daily(contact_id: int) -> str | None:
     day_start = datetime.datetime.combine(
         today,
         datetime.time.min,
-        tzinfo=datetime.timezone.utc,
+        tzinfo=datetime.UTC,
     )
     msgs = await get_messages_since(
         from_contact_id=contact_id,
@@ -103,7 +103,7 @@ async def summarize_all_contacts(platform: str | None = None) -> list[str]:
     day_start = datetime.datetime.combine(
         today,
         datetime.time.min,
-        tzinfo=datetime.timezone.utc,
+        tzinfo=datetime.UTC,
     )
 
     contact_ids = await get_contacts_with_messages_since(day_start, platform)
@@ -133,4 +133,15 @@ async def summarize_all_contacts(platform: str | None = None) -> list[str]:
                 )
 
     logger.info("Summarized %d/%d contacts", len(summaries), len(contact_ids))
+
+    # Drain a bounded slice of historical days left behind by a backfill.
+    # This is separate from today's summary so a large import cannot turn
+    # the 6-hour job into one LLM call per raw message.
+    try:
+        from src.core.sync.catchup import catchup_unsummarized_days
+
+        await catchup_unsummarized_days()
+    except Exception:
+        logger.warning("Historical summary catch-up failed", exc_info=True)
+
     return summaries

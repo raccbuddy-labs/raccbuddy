@@ -14,7 +14,8 @@ const qrcode = require("qrcode-terminal");
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const { forwardMessage } = require("./forwarder");
+const { forwardMessage, forwardBatch, fetchCursor } = require("./forwarder");
+const { syncHistory, messagePayload } = require("./history");
 
 // ---------------------------------------------------------------------------
 // Clean up stale Chromium lock files left after crash / forced stop
@@ -81,6 +82,16 @@ client.on("qr", (qr) => {
 
 client.on("ready", () => {
   console.log("✅ WhatsApp client is ready and connected!");
+  // History is not delivered by message_create. Fetch the local window,
+  // then keep listening for live messages. Dedup lives in the Python core.
+  syncHistory(client, {
+    delayMs: 750,
+    fetchCursor: (scope) => fetchCursor(PYTHON_CORE_URL, scope),
+    forwardBatch: (messages, opts) =>
+      forwardBatch(PYTHON_CORE_URL, messages, opts && opts.historyComplete),
+  }).catch((err) => {
+    console.error("History sync failed:", err.message);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -143,10 +154,13 @@ client.on("message_create", async (msg) => {
       `📩 ${msg.fromMe ? "Sent" : "Received"} message ${msg.fromMe ? "to" : "from"} ${contactName}: ${msg.body.substring(0, 50)}...`
     );
 
-    // Build payload matching the Python core schema
+    // Build payload matching the Python core schema. external_message_id
+    // is the idempotency key: live delivery and history sync share it.
+    const base = messagePayload(msg, chat) || {};
     const payload = {
       platform: "whatsapp",
       chat_id: chatJid,
+      external_message_id: base.external_message_id || null,
       from_id: contactNumber,
       contact_name: contactName,
       text: msg.body,
@@ -159,6 +173,33 @@ client.on("message_create", async (msg) => {
     await forwardMessage(PYTHON_CORE_URL, payload);
   } catch (err) {
     console.error("Error processing message:", err.message);
+  }
+});
+
+// Edits keep the same provider id. The core updates the row in place.
+client.on("message_edit", async (msg) => {
+  try {
+    if (!msg || msg.from === "status@broadcast") return;
+    const chat = await msg.getChat();
+    const base = messagePayload(msg, chat);
+    if (!base || !base.external_message_id) return;
+    let contactName = chat.name || "Unknown";
+    let contactNumber = base.chat_id;
+    try {
+      const contact = msg.fromMe ? await chat.getContact() : await msg.getContact();
+      contactName = contact.pushname || contact.name || contact.number || contactName;
+      contactNumber = contact.number || contactNumber;
+    } catch {
+      // Fall back to the chat JID. The id is what dedup uses.
+    }
+    await forwardMessage(PYTHON_CORE_URL, {
+      ...base,
+      from_id: contactNumber,
+      contact_name: contactName,
+      edited_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error processing edit:", err.message);
   }
 });
 

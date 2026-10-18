@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
-from sqlalchemy import desc, distinct, func, select
+from sqlalchemy import desc, distinct, func, nullslast, select
 
 from src.core.db.models import Contact, Habit, Message, Relationship, Summary
 from src.core.db.session import get_session
@@ -53,7 +54,11 @@ async def get_recent_messages(
     stmt = select(Message).where(Message.chat_id == chat_id)
     if from_contact_id is not None:
         stmt = stmt.where(Message.from_contact_id == from_contact_id)
-    stmt = stmt.order_by(desc(Message.timestamp)).limit(limit)
+    stmt = stmt.order_by(
+        desc(Message.timestamp),
+        nullslast(desc(Message.external_message_id)),
+        desc(Message.id),
+    ).limit(limit)
 
     async with get_session() as session:
         result = await session.execute(stmt)
@@ -84,7 +89,11 @@ async def get_conversation_history(
             Message.chat_id == chat_id,
             Message.from_contact_id.is_(None),
         )
-        .order_by(desc(Message.timestamp))
+        .order_by(
+            desc(Message.timestamp),
+            nullslast(desc(Message.external_message_id)),
+            desc(Message.id),
+        )
         .limit(limit)
     )
     async with get_session() as session:
@@ -105,7 +114,11 @@ async def get_messages_since(
             Message.from_contact_id == from_contact_id,
             Message.timestamp >= since,
         )
-        .order_by(Message.timestamp)
+        .order_by(
+            Message.timestamp,
+            nullslast(Message.external_message_id),
+            Message.id,
+        )
         .limit(limit)
     )
     async with get_session() as session:
@@ -294,7 +307,11 @@ async def get_recent_messages_for_contact(
     stmt = (
         select(Message)
         .where(Message.from_contact_id == contact_id)
-        .order_by(desc(Message.timestamp))
+        .order_by(
+            desc(Message.timestamp),
+            nullslast(desc(Message.external_message_id)),
+            desc(Message.id),
+        )
         .limit(limit)
     )
     async with get_session() as session:

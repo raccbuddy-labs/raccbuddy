@@ -5,6 +5,20 @@ All notable changes to RaccBuddy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Message ingest no longer keeps only whatever arrived after a connector started. WhatsApp backfills the local history window, Telegram history can be imported from a Desktop `result.json` export (the Bot API cannot return history), and every provider message is stored under a stable id.
+- Re-running a backfill does not insert duplicates. Edits update the existing row and keep the original send time. Reads order by that time, not by ingest time.
+- Bridge chat ids no longer use Python's per-process `hash()`, which split one WhatsApp chat across new ids after every restart.
+- A redelivered Telegram update does not call the model again.
+- Historical catch-up summarizes by day in bounded windows (one embed per day, a cap on LLM calls) instead of one model call per message.
+
+### Migration
+
+- `alembic upgrade head` (revision `b2c4d6e8f0a1`) adds provider message ids, `sync_cursors`, and timestamp indexes. Pre-upgrade WhatsApp rows used an unstable `chat_id` and are not rewritten. See `docs/sync.md`.
+
 ## [0.2.0-beta] - 2026-02-28
 
 ### Critical Fixes

@@ -79,6 +79,16 @@ class Settings(BaseSettings):
     # Max words per daily contact summary
     max_summary_words: int = 150
 
+    # History catch-up. One LLM call per window of messages, one embed per
+    # day, and a hard cap so a multi-year backfill cannot fill the GPU in a
+    # single pass. The periodic summary job drains the rest.
+    sync_summary_window: int = 40
+    sync_summary_max_days: int = 10
+    sync_summary_max_llm_calls: int = 30
+    sync_summary_pause_seconds: float = 0.25
+    # Re-read this many seconds before the cursor on incremental sync.
+    sync_overlap_seconds: int = 120
+
     # ------------------------------------------------------------------ #
     # Context builder tuning
     # ------------------------------------------------------------------ #

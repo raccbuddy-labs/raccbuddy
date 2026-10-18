@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -14,12 +14,15 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
+    text as sa_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -63,11 +66,23 @@ class Contact(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index(
+            "uq_messages_provider_key",
+            "platform",
+            "external_chat_id",
+            "external_message_id",
+            unique=True,
+            postgresql_where=sa_text("external_message_id IS NOT NULL"),
+        ),
+        Index("ix_messages_chat_timestamp", "chat_id", "timestamp"),
+        Index("ix_messages_contact_timestamp", "from_contact_id", "timestamp"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     platform: Mapped[str] = mapped_column(String(50), nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    from_contact_id: Mapped[Optional[int]] = mapped_column(
+    from_contact_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("contacts.id", ondelete="CASCADE"),
         nullable=True,
@@ -75,7 +90,69 @@ class Message(Base):
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
     is_bot_reply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_from_owner: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    # Provider identifiers. Null on rows written before history sync.
+    external_chat_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    external_message_id: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    # When the provider says the message was sent. Distinct from ingested_at.
     timestamp: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    edited_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    ingested_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=True,
+    )
+
+
+class SyncCursor(Base):
+    """Per-provider, per-chat watermark for history backfill and incremental sync.
+
+    ``newest_at`` is the latest original timestamp stored for this scope.
+    Incremental sync re-reads a short overlap before that instant and relies
+    on the provider-message unique key to drop duplicates. ``backfill_complete``
+    stays false while the provider still reports a full page, so raising the
+    page cap on a later run can pull older messages.
+    """
+
+    __tablename__ = "sync_cursors"
+    __table_args__ = (
+        UniqueConstraint("platform", "scope", name="uq_sync_cursor_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)
+    scope: Mapped[str] = mapped_column(String(512), nullable=False)
+    newest_external_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    newest_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    oldest_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    backfill_complete: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
@@ -121,11 +198,11 @@ class Habit(Base):
     trigger: Mapped[str] = mapped_column(String(200), nullable=False)
     frequency: Mapped[float] = mapped_column(Float, default=0.0)
     correlation: Mapped[float] = mapped_column(Float, default=0.0)
-    last_detected: Mapped[Optional[datetime.datetime]] = mapped_column(
+    last_detected: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
-    suggestion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(String(50), nullable=False, default="general")
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -139,15 +216,13 @@ class PersistentUserState(Base):
         BigInteger, nullable=False, unique=True, index=True
     )
     mood: Mapped[str] = mapped_column(String(50), nullable=False, default="neutral")
-    last_active: Mapped[Optional[datetime.datetime]] = mapped_column(
+    last_active: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
     message_count_today: Mapped[int] = mapped_column(Integer, default=0)
     streak_days: Mapped[int] = mapped_column(Integer, default=0)
-    last_streak_date: Mapped[Optional[datetime.date]] = mapped_column(
-        Date, nullable=True
-    )
+    last_streak_date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
     extra: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
@@ -173,7 +248,7 @@ class PersistentContactState(Base):
         index=True,
     )
     score: Mapped[int] = mapped_column(Integer, default=50)
-    last_message_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+    last_message_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
@@ -191,7 +266,7 @@ class MoodEntry(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    contact_id: Mapped[Optional[int]] = mapped_column(
+    contact_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("contacts.id", ondelete="CASCADE"),
         nullable=True,
@@ -252,22 +327,20 @@ class ScheduledJobModel(Base):
     )
 
     # Recurrence fields
-    recurrence_type: Mapped[Optional[str]] = mapped_column(
+    recurrence_type: Mapped[str | None] = mapped_column(
         String(20), nullable=True, default=None
     )
-    recurrence_rule: Mapped[Optional[str]] = mapped_column(
+    recurrence_rule: Mapped[str | None] = mapped_column(
         String(200), nullable=True, default=None
     )
-    next_fire_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+    next_fire_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    last_executed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+    last_executed_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    last_response: Mapped[Optional[str]] = mapped_column(
-        Text, nullable=True, default=None
-    )
+    last_response: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +381,7 @@ class SemanticMemory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    contact_id: Mapped[Optional[int]] = mapped_column(
+    contact_id: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
         index=True,
@@ -337,7 +410,7 @@ class SemanticMemory(Base):
         server_default=func.now(),
         nullable=False,
     )
-    expires_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
@@ -369,10 +442,10 @@ class AppLog(Base):
     level: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     logger_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    traceback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    module: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    func_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    line_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    module: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    func_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    line_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

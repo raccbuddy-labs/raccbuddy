@@ -609,6 +609,13 @@ docker compose up whatsapp
 
 See [whatsapp-service/README.md](whatsapp-service/README.md) for details.
 
+On startup the bridge also backfills the newest window of each chat
+(`chat.fetchMessages`). WhatsApp Web cannot see the entire archive; the
+cap is `WHATSAPP_HISTORY_MAX_PER_CHAT` (default 500). Re-running the
+backfill does not duplicate rows. Limits, cursors, and the Telegram
+Desktop export path (the Bot API has no history method) are in
+[docs/sync.md](docs/sync.md).
+
 ### Adding More Platforms
 
 Create a bridge that POSTs to the REST API.  When `API_SECRET_KEY` is set,
