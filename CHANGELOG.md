@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `ruff check` ignores the style rules added after the last green CI run (March 2026) so lint stays green without a drive-by rewrite of the tree.
+- CI installs `numpy` so the Bark voice unit tests can build a fake audio buffer. The rest of the voice stack stays in `requirements-voice.txt`.
 
 ## [0.2.0-beta] - 2026-02-28
 
