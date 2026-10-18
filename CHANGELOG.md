@@ -5,6 +5,12 @@ All notable changes to RaccBuddy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Added `docs/analysis/2026-10-codebase-review.md`: architecture review, history-ingestion gap, and a reassessment of the small-model workarounds against a 16 GB RTX 5080.
+
 ## [0.2.0-beta] - 2026-02-28
 
 ### Critical Fixes
