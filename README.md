@@ -618,8 +618,13 @@ Desktop export path (the Bot API has no history method) are in
 
 ### Adding More Platforms
 
-Create a bridge that POSTs to the REST API.  When `API_SECRET_KEY` is set,
-include the key in every request:
+IMAP and Matrix are optional in-process connectors. They are off until
+`IMAP_ENABLED` or `MATRIX_ENABLED` is set. Setup, history limits, and the
+providers that were looked at and not built (Signal, Slack, Discord,
+iMessage/SMS) are in [docs/connectors.md](docs/connectors.md).
+
+A bridge in another language POSTs to the REST API. When `API_SECRET_KEY`
+is set, include the key in every request:
 
 ```bash
 POST /api/messages
@@ -633,6 +638,7 @@ X-API-Key: your-api-secret-key
   "contact_name": "John Doe",
   "text": "Hello!",
   "timestamp": "2026-02-21T10:00:00Z",
+  "external_message_id": "provider-message-id",
   "is_group": false
 }
 ```
@@ -963,7 +969,7 @@ A: The bot requires internet to receive Telegram/WhatsApp messages, but LLM proc
 ### Features
 
 **Q: What platforms are supported?**
-A: Currently Telegram (native) and WhatsApp (via bridge). Signal, Discord, and others are planned.
+A: Telegram (native) and WhatsApp (bridge). Optional IMAP and Matrix pull connectors are in the repo and off by default. See [docs/connectors.md](docs/connectors.md).
 
 **Q: Can multiple people use one instance?**
 A: Not yet. RaccBuddy currently locks to one owner (the first person to send `/start`). Multi-user support is on the roadmap.

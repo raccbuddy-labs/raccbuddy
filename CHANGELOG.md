@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional IMAP and Matrix connectors. Both backfill through the shared history ingest (Message-ID / event id, cursors, chunked writes) and stay off unless enabled. Encrypted Matrix rooms are skipped. Signal, Slack, Discord, and iMessage/SMS are documented in `docs/connectors.md` and not implemented.
+- `plugins/example_echo.py` no longer calls `save_message` with arguments that function does not accept. It only logs.
+
 ### Fixed
 
 - Message ingest no longer keeps only whatever arrived after a connector started. WhatsApp backfills the local history window, Telegram history can be imported from a Desktop `result.json` export (the Bot API cannot return history), and every provider message is stored under a stable id.

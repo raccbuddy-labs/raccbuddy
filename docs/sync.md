@@ -117,3 +117,12 @@ WhatsApp chats ingested before this change used a per-process `hash()` as
 use the stable id, so a pre-upgrade WhatsApp thread and its post-upgrade
 messages will not share `chat_id`. Telegram integer ids are unchanged.
 There is no automatic rewrite of the old WhatsApp rows.
+
+## IMAP and Matrix
+
+Those connectors use this same contract. IMAP keys mail by `Message-ID`
+and keeps the UID watermark on a separate cursor. Matrix keys events by
+event id, stores `next_batch` on scope `__sync__`, and stores the
+backward pagination token on `backfill:{roomId}`. Limits and the
+providers that were considered and not built are in
+[connectors.md](connectors.md).
