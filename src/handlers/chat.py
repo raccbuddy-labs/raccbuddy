@@ -16,7 +16,6 @@ from src.core.db import (
     get_all_contacts_all_platforms,
     get_contact_by_name_any_platform,
     get_relationship,
-    save_message,
     upsert_contact,
 )
 from src.core.llm import (
@@ -43,6 +42,9 @@ from src.core.state import (
     get_state,
     update_contact_state,
 )
+from src.core.sync.facade import persist_incoming
+from src.core.sync.keys import ensure_utc, fallback_external_message_id
+from src.core.sync.types import IncomingRecord
 from src.core.tools import execute_tool, get_all_tool_schemas
 from src.utils.telegram_format import md_to_telegram_html
 
@@ -58,6 +60,57 @@ _NAME_PATTERN = re.compile(
 def _owner_id() -> int:
     """Return canonical owner ID (Telegram user ID from config)."""
     return settings.owner_telegram_id
+
+
+def _message_timestamp(message: object) -> datetime.datetime:
+    """Original Telegram send time, or now if the update has none."""
+    raw = getattr(message, "date", None)
+    if isinstance(raw, datetime.datetime):
+        return ensure_utc(raw)
+    return datetime.datetime.now(datetime.UTC)
+
+
+def _telegram_external_id(message: object, chat_id: int, text: str) -> str:
+    """Stable id for a Telegram message. Falls back to a content hash."""
+    mid = getattr(message, "message_id", None)
+    if isinstance(mid, int):
+        return str(mid)
+    return fallback_external_message_id(
+        platform="telegram",
+        external_chat_id=str(chat_id),
+        timestamp=_message_timestamp(message),
+        sender_handle=str(getattr(getattr(message, "from_user", None), "id", "")),
+        text=text,
+    )
+
+
+def _telegram_record(
+    message: object,
+    *,
+    chat_id: int,
+    text: str,
+    external_message_id: str,
+    is_from_owner: bool,
+    is_bot_reply: bool = False,
+    contact_id: int | None = None,
+    sender_handle: str = "",
+    sender_name: str | None = None,
+    edited_at: datetime.datetime | None = None,
+) -> IncomingRecord:
+    """Build an ingest record for one Telegram update."""
+    return IncomingRecord(
+        platform="telegram",
+        external_chat_id=str(chat_id),
+        external_message_id=external_message_id,
+        text=text,
+        timestamp=_message_timestamp(message),
+        sender_handle=sender_handle,
+        sender_name=sender_name,
+        is_from_owner=is_from_owner,
+        is_bot_reply=is_bot_reply,
+        contact_id=contact_id,
+        edited_at=edited_at,
+    )
 
 
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -94,7 +147,7 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         # Update per-contact state
         cs = get_contact_state(owner, contact.id)
-        cs.last_message_at = datetime.datetime.now(datetime.timezone.utc)
+        cs.last_message_at = datetime.datetime.now(datetime.UTC)
         cs.message_count += 1
 
     # Check for name mapping pattern (e.g., "this is Giulia")
@@ -109,17 +162,33 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    # Persist raw message (from_contact_id=None for owner direct messages)
-    await save_message(
-        platform="telegram",
-        chat_id=chat_id,
-        from_contact_id=contact.id if contact else None,
-        text_content=text,
+    # Persist by Telegram message id. A redelivered update (getUpdates
+    # retry, process restart before the offset was acked) is a duplicate
+    # and does not generate a second reply.
+    external_id = _telegram_external_id(update.message, chat_id, text)
+    sender_handle = str(forwarded_user_id or user_id)
+    ingested = await persist_incoming(
+        [
+            _telegram_record(
+                update.message,
+                chat_id=chat_id,
+                text=text,
+                external_message_id=external_id,
+                is_from_owner=contact is None,
+                contact_id=contact.id if contact else None,
+                sender_handle=sender_handle,
+                sender_name=update.effective_user.first_name,
+            )
+        ],
+        owner_id=owner,
     )
+    if ingested.is_replay is True:
+        logger.info("Ignoring redelivered Telegram message %s", external_id)
+        return
 
     # Update in-memory user state
     user_state = get_state(user_id)
-    user_state.last_active = datetime.datetime.now(datetime.timezone.utc)
+    user_state.last_active = datetime.datetime.now(datetime.UTC)
     user_state.message_count_today += 1
 
     # --- Async enrichment (mood, relationship, state flush) ---
@@ -151,13 +220,21 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         await update.message.reply_text(md_to_telegram_html(reply), parse_mode="HTML")
 
-        # Persist bot reply for conversation history
+        # Persist bot reply for conversation history. Keyed off the user
+        # message id so a retry does not store a second assistant turn.
         try:
-            await save_message(
-                platform="telegram",
-                chat_id=chat_id,
-                text_content=reply,
-                is_bot_reply=True,
+            await persist_incoming(
+                [
+                    _telegram_record(
+                        update.message,
+                        chat_id=chat_id,
+                        text=reply,
+                        external_message_id=f"reply:{external_id}",
+                        is_from_owner=True,
+                        is_bot_reply=True,
+                    )
+                ],
+                owner_id=owner,
             )
         except Exception:
             logger.warning("Failed to save bot reply", exc_info=True)
@@ -166,6 +243,42 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(
             "Oops, my raccoon brain glitched 🦝 Try again in a sec!"
         )
+
+
+async def edited_message_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Apply a Telegram edit to the existing row. Does not send a new reply."""
+    message = update.edited_message
+    if not message or not message.text or not update.effective_user:
+        return
+    if await reject_non_owner(update):
+        return
+
+    user_id = update.effective_user.id
+    owner = _owner_id() or user_id
+    chat_id = update.effective_chat.id if update.effective_chat else user_id
+    edited_at = (
+        message.edit_date if isinstance(message.edit_date, datetime.datetime) else None
+    )
+    if edited_at is not None:
+        edited_at = ensure_utc(edited_at)
+    external_id = _telegram_external_id(message, chat_id, message.text)
+    await persist_incoming(
+        [
+            _telegram_record(
+                message,
+                chat_id=chat_id,
+                text=message.text,
+                external_message_id=external_id,
+                is_from_owner=True,
+                sender_handle=str(user_id),
+                edited_at=edited_at or datetime.datetime.now(datetime.UTC),
+            )
+        ],
+        owner_id=owner,
+    )
 
 
 async def _enrich_after_message(

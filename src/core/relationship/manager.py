@@ -68,7 +68,7 @@ class RelationshipManager:
         from src.core.db.models import Message
         from src.core.db.session import get_session
 
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
             days=_WINDOW_DAYS
         )
 
@@ -78,6 +78,7 @@ class RelationshipManager:
                 .select_from(Message)
                 .where(
                     Message.from_contact_id == contact_id,
+                    Message.is_from_owner.is_(False),
                     Message.timestamp >= cutoff,
                 )
             )
@@ -96,6 +97,7 @@ class RelationshipManager:
             result = await session.execute(
                 select(func.max(Message.timestamp)).where(
                     Message.from_contact_id == contact_id,
+                    Message.is_from_owner.is_(False),
                 )
             )
             last_ts = result.scalar_one_or_none()
@@ -103,7 +105,7 @@ class RelationshipManager:
         if last_ts is None:
             return 0.0
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         hours_ago = (now - last_ts).total_seconds() / 3600
 
         return max(0.0, min(100.0, 100 * math.exp(-hours_ago / 72)))
@@ -113,7 +115,7 @@ class RelationshipManager:
         from src.core.db.models import MoodEntry
         from src.core.db.session import get_session
 
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
             days=_WINDOW_DAYS
         )
 
@@ -137,7 +139,7 @@ class RelationshipManager:
         from src.core.db.models import Message
         from src.core.db.session import get_session
 
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
             days=_WINDOW_DAYS
         )
 
@@ -147,17 +149,22 @@ class RelationshipManager:
                 .select_from(Message)
                 .where(
                     Message.from_contact_id == contact_id,
+                    Message.is_from_owner.is_(False),
                     Message.timestamp >= cutoff,
                 )
             )
             contact_msgs = r1.scalar_one() or 0
 
+            # Owner replies inside this contact's thread, not the owner's
+            # private chat with the bot. ``owner_id`` is unused: the thread
+            # is identified by the contact row.
+            _ = owner_id
             r2 = await session.execute(
                 select(func.count())
                 .select_from(Message)
                 .where(
-                    Message.chat_id == owner_id,
-                    Message.from_contact_id.is_(None),
+                    Message.from_contact_id == contact_id,
+                    Message.is_from_owner.is_(True),
                     Message.timestamp >= cutoff,
                 )
             )

@@ -41,6 +41,7 @@ from src.handlers.chat import (
     analyze_handler,
     chat_handler,
     contacts_handler,
+    edited_message_handler,
     insights_handler,
     name_handler,
     relationship_handler,
@@ -258,6 +259,12 @@ def main() -> None:
 
     # Message handler for all non-command text (including forwarded)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
+    # Edits update the stored row in place (same message id, new body).
+    app.add_handler(
+        MessageHandler(
+            filters.UpdateType.EDITED_MESSAGE & filters.TEXT, edited_message_handler
+        )
+    )
 
     # Voice message handler (voice notes + audio files)
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_handler))

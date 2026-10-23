@@ -40,23 +40,9 @@ class EchoPlugin(BasePlugin):
         2. Save it to the database
         3. Optionally trigger a response
         """
-        from src.core.db import save_message
-
-        chat_id = message.get("chat_id", 0)
-        from_id = message.get("from_id", 0)
-        text = message.get("text", "")
-        owner_id = message.get("owner_id", from_id)
-
-        logger.info("Echo plugin received message: %s", text)
-
-        # Save to database
-        await save_message(
-            platform=self.platform,
-            chat_id=chat_id,
-            from_id=from_id,
-            text_content=text,
-            contact_id=from_id if from_id != owner_id else None,
-        )
+        logger.info("Echo plugin received message: %s", message.get("text", ""))
+        # This sample does not persist. A real connector calls
+        # src.core.sync.persist_incoming. See docs/connectors.md.
 
     async def teardown(self) -> None:
         """Called during bot shutdown."""

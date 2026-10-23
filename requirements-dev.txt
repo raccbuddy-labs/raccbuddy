@@ -1,0 +1,4 @@
+# Developer tools scanned by the dependency audit.
+# Runtime and test dependencies live in requirements.txt.
+# Optional voice dependencies live in requirements-voice.txt.
+black>=26.10.1

@@ -56,28 +56,27 @@ class WhatsAppPlugin(BasePlugin):
         self.app = app
 
     async def handle_message(self, message: dict[str, Any]) -> None:
-        """Process an incoming WhatsApp message.
+        """Process one message from the bridge.
 
-        This is called by your bridge service (e.g., whatsapp-service)
-        via the REST API endpoint.
+        Persist with ``persist_incoming`` so a retried backfill does not
+        insert a second row. See ``docs/connectors.md``.
         """
-        from src.core.db import save_message
+        from src.core.sync import IncomingRecord, persist_incoming
 
-        chat_id = message.get("chat_id")
-        from_id = message.get("from_id")
-        text = message.get("text")
-        owner_id = message.get("owner_id")
-
-        # Save to database
-        await save_message(
-            platform=self.platform,
-            chat_id=chat_id,
-            from_id=from_id,
-            text_content=text,
-            contact_id=from_id if from_id != owner_id else None,
+        await persist_incoming(
+            [
+                IncomingRecord(
+                    platform=self.platform,
+                    external_chat_id=str(message["chat_id"]),
+                    external_message_id=str(message["external_message_id"]),
+                    text=message["text"],
+                    timestamp=message["timestamp"],
+                    sender_handle=str(message.get("from_id") or ""),
+                    is_from_owner=bool(message.get("from_me")),
+                )
+            ],
+            owner_id=message["owner_id"],
         )
-
-        logger.info("Saved WhatsApp message from %s", from_id)
 
     async def teardown(self) -> None:
         """Clean up resources when the bot shuts down."""
@@ -93,8 +92,9 @@ register_plugin(WhatsAppPlugin())
 
 - **`register(app)`** is called once at bot startup. Store the `app` reference
   if you need to send messages back via Telegram.
-- **`handle_message(message)`** is called for each incoming message from your
-  platform. Save it to the DB using `save_message()`.
+- **`handle_message(message)`** is the push path. Persist with
+  `persist_incoming` (see `docs/connectors.md`), not `save_message()`.
+  Pull connectors (IMAP, Matrix) no-op here and sync from `register()`.
 - **`teardown()`** is optional — override it if you need to close connections
   or clean up resources.
 
@@ -122,13 +122,7 @@ See `whatsapp-service/` for a working example using `whatsapp-web.js`.
 ### Available helpers
 
 ```python
-from src.core.db import (
-    save_message,
-    get_contact,
-    upsert_contact,
-)
-from src.core.llm import generate
-from src.core.memory import build_context_for_contact
+from src.core.sync import IncomingRecord, persist_incoming
 ```
 
-See `src/plugins/base.py` for the full `BasePlugin` API.
+See `docs/connectors.md` and `src/plugins/base.py`.

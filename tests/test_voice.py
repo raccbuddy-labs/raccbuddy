@@ -859,7 +859,7 @@ class TestVoiceHandler:
     @patch("src.handlers.voice.provider_supports_tools", return_value=False)
     @patch("src.handlers.voice.generate_chat", new_callable=AsyncMock)
     @patch("src.handlers.voice.context_builder.build_messages", new_callable=AsyncMock)
-    @patch("src.handlers.voice.save_message", new_callable=AsyncMock)
+    @patch("src.handlers.voice.persist_incoming", new_callable=AsyncMock)
     async def test_full_voice_pipeline_text_reply(
         self,
         mock_save: AsyncMock,

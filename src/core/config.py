@@ -79,6 +79,44 @@ class Settings(BaseSettings):
     # Max words per daily contact summary
     max_summary_words: int = 150
 
+    # History catch-up. One LLM call per window of messages, one embed per
+    # day, and a hard cap so a multi-year backfill cannot fill the GPU in a
+    # single pass. The periodic summary job drains the rest.
+    sync_summary_window: int = 40
+    sync_summary_max_days: int = 10
+    sync_summary_max_llm_calls: int = 30
+    sync_summary_pause_seconds: float = 0.25
+    # Re-read this many seconds before the cursor on incremental sync.
+    sync_overlap_seconds: int = 120
+
+    # ------------------------------------------------------------------ #
+    # IMAP (optional pull connector)
+    # ------------------------------------------------------------------ #
+    imap_enabled: bool = False
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_username: str = ""
+    imap_password: str = ""
+    imap_ssl: bool = True
+    # From address treated as the owner. Defaults to the username.
+    imap_owner_address: str = ""
+    imap_mailboxes: str = "INBOX,Sent"
+    # Bodies fetched per mailbox per run. Older mail continues next run.
+    imap_history_max: int = 500
+    imap_sync_interval_seconds: int = 300
+
+    # ------------------------------------------------------------------ #
+    # Matrix (optional pull connector, unencrypted rooms only)
+    # ------------------------------------------------------------------ #
+    matrix_enabled: bool = False
+    matrix_homeserver: str = ""
+    matrix_access_token: str = ""
+    matrix_user_id: str = ""
+    matrix_history_max_per_room: int = 500
+    matrix_page_size: int = 50
+    matrix_history_pause_seconds: float = 0.2
+    matrix_sync_interval_seconds: int = 60
+
     # ------------------------------------------------------------------ #
     # Context builder tuning
     # ------------------------------------------------------------------ #

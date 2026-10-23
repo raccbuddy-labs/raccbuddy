@@ -18,17 +18,22 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from src.core.config import settings
-from src.core.db.crud import save_message, upsert_contact
+from src import __version__
+from src.core.sync.facade import persist_incoming, read_cursor
+from src.core.sync.keys import ensure_utc, fallback_external_message_id
+from src.core.sync.telegram_export import parse_telegram_export_owned
+from src.core.sync.types import IncomingRecord
 
 logger = logging.getLogger(__name__)
 
-api = FastAPI(title="RaccBuddy Core API", version="0.1.0")
+_MAX_BATCH = 500
+
+api = FastAPI(title="RaccBuddy Core API", version=__version__)
 
 
 # ---------------------------------------------------------------------------
@@ -42,12 +47,32 @@ class IncomingMessage(BaseModel):
     platform: str
     chat_id: str
     from_id: str
-    contact_name: Optional[str] = None
+    contact_name: str | None = None
     text: str
-    timestamp: Optional[str] = None
-    is_group: Optional[bool] = False
-    group_name: Optional[str] = None
-    from_me: Optional[bool] = False  # True if message is from the owner
+    timestamp: str | None = None
+    is_group: bool | None = False
+    group_name: str | None = None
+    from_me: bool | None = False  # True if message is from the owner
+    # Provider message id. When omitted, a hash of the payload is used so
+    # retries of the same body do not insert a second row.
+    external_message_id: str | None = None
+    edited_at: str | None = None
+
+
+class IncomingBatch(BaseModel):
+    """A page of history or a short incremental sync from one connector."""
+
+    messages: list[IncomingMessage]
+    # True when the connector fetched fewer messages than it asked for, so
+    # older history is exhausted for this scope.
+    history_complete: bool = False
+
+
+class TelegramExportBody(BaseModel):
+    """Telegram Desktop ``result.json`` contents, plus an optional owner id."""
+
+    export: dict
+    owner_from_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +80,7 @@ class IncomingMessage(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _verify_api_key(x_api_key: Optional[str]) -> None:
+def _verify_api_key(x_api_key: str | None) -> None:
     """Raise HTTP 401 if the API key is configured but not provided / wrong.
 
     Args:
@@ -86,91 +111,219 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _owner_or_503() -> int:
+    """Return the configured owner id or raise 503."""
+    owner_id = settings.owner_telegram_id
+    if not owner_id:
+        raise HTTPException(
+            status_code=503,
+            detail=("OWNER_TELEGRAM_ID not configured — run /start on Telegram first."),
+        )
+    return owner_id
+
+
+class MissingSendTimestamp(ValueError):
+    """The bridge did not send a parseable provider timestamp.
+
+    Substituting ``now()`` would make a backfill look like it happened at
+    ingest time, so ordering would follow arrival order.
+    """
+
+
+def _parse_ts(value: str | None) -> datetime.datetime | None:
+    if not value:
+        return None
+    try:
+        return ensure_utc(datetime.datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def record_from_payload(msg: IncomingMessage) -> IncomingRecord:
+    """Map a bridge payload onto an :class:`IncomingRecord`.
+
+    Chat ids are *not* derived with Python's ``hash()``. That value is
+    salted per process, so the same WhatsApp chat was stored under a new
+    integer after every restart. :func:`persist_incoming` hashes with SHA-256
+    instead, and Telegram keeps the integer id Telegram assigned.
+    """
+    timestamp = _parse_ts(msg.timestamp)
+    if timestamp is None:
+        raise MissingSendTimestamp(
+            "A provider send timestamp is required. "
+            "Refusing to store ingest time as the send time."
+        )
+    is_owner = bool(msg.from_me)
+    if (
+        msg.platform == "whatsapp"
+        and settings.owner_whatsapp_number
+        and msg.from_id == settings.owner_whatsapp_number
+    ):
+        is_owner = True
+    external_id = msg.external_message_id or fallback_external_message_id(
+        platform=msg.platform,
+        external_chat_id=msg.chat_id,
+        timestamp=timestamp,
+        sender_handle=msg.from_id,
+        text=msg.text,
+    )
+    return IncomingRecord(
+        platform=msg.platform,
+        external_chat_id=msg.chat_id,
+        external_message_id=external_id,
+        text=msg.text,
+        timestamp=timestamp,
+        sender_handle=msg.from_id,
+        sender_name=msg.contact_name,
+        is_from_owner=is_owner,
+        edited_at=_parse_ts(msg.edited_at),
+        is_group=bool(msg.is_group),
+    )
+
+
 @api.post("/api/messages")
 async def receive_message(
     msg: IncomingMessage,
-    x_api_key: Optional[str] = Header(default=None),
-) -> dict[str, str]:
-    """Accept a message from an external bridge and persist it.
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, int | str]:
+    """Accept a message from an external bridge and persist it idempotently.
 
-    The contact_handle is stored directly from the platform (e.g., phone
-    number for WhatsApp, user_id for Telegram).  The contact is looked
-    up/created to get its database ID, which is then used as a foreign key
-    in the messages table.
+    A repeated POST of the same provider message id is a duplicate, not a
+    second row. A repeated POST with the same id and a different body is
+    stored as an edit and keeps the original send time.
 
     Args:
         msg: Incoming message payload from the bridge.
         x_api_key: Value of the ``X-API-Key`` header (injected by FastAPI).
 
     Returns:
-        ``{"status": "ok"}`` on success.
+        Status plus insert / update / duplicate counts.
 
     Raises:
         HTTPException: 401 on auth failure, 503 if owner not configured,
             500 on internal error.
     """
     _verify_api_key(x_api_key)
-
+    owner_id = _owner_or_503()
     try:
-        # The canonical owner is the configured Telegram owner.
-        # All external contacts are stored under this single owner.
-        owner_id = settings.owner_telegram_id
-        if not owner_id:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "OWNER_TELEGRAM_ID not configured — "
-                    "run /start on Telegram first."
-                ),
-            )
-
-        # Parse timestamp or fall back to now
-        ts: datetime.datetime | None = None
-        if msg.timestamp:
-            try:
-                ts = datetime.datetime.fromisoformat(msg.timestamp)
-            except ValueError:
-                ts = None
-
-        # Determine if this message is from the owner
-        is_owner_message = False
-        if msg.platform == "whatsapp" and msg.from_me:
-            is_owner_message = True
-        elif msg.platform == "whatsapp" and settings.owner_whatsapp_number:
-            if msg.from_id == settings.owner_whatsapp_number:
-                is_owner_message = True
-
-        # Upsert contact using the raw platform ID as the handle
-        contact = await upsert_contact(
+        try:
+            record = record_from_payload(msg)
+        except MissingSendTimestamp as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        result = await persist_incoming(
+            [record],
             owner_id=owner_id,
-            contact_handle=msg.from_id,
-            platform=msg.platform,
-            contact_name=msg.contact_name or msg.from_id,
+            gap_blocks_complete=True,
         )
-
-        # Derive a stable positive int64 chat_id from the string chat_id
-        chat_id_value = hash(msg.chat_id) & 0x7FFFFFFFFFFFFFFF
-
-        await save_message(
-            platform=msg.platform,
-            chat_id=chat_id_value,
-            from_contact_id=contact.id,
-            text_content=msg.text,
-            timestamp=ts,
-        )
-
         logger.info(
-            "Saved %s message %s %s%s (handle: %s)",
+            "Ingested %s message from %s (%s)",
             msg.platform,
-            "to" if msg.from_me else "from",
             msg.contact_name or msg.from_id,
-            " [OWNER]" if is_owner_message else "",
-            msg.from_id,
+            result.as_dict(),
         )
-        return {"status": "ok"}
-
+        return {"status": "ok", **result.as_dict()}
     except HTTPException:
         raise
     except Exception:
         logger.exception("Failed to save incoming message from %s", msg.from_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@api.post("/api/messages/batch")
+async def receive_batch(
+    batch: IncomingBatch,
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, int | str | bool]:
+    """Ingest a history page. Re-running the same page inserts nothing.
+
+    Summaries and embeddings are not computed inside this request. The
+    periodic summary job drains them in bounded batches.
+    """
+    _verify_api_key(x_api_key)
+    owner_id = _owner_or_503()
+    if len(batch.messages) > _MAX_BATCH:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Batch limit is {_MAX_BATCH} messages.",
+        )
+    try:
+        records: list[IncomingRecord] = []
+        skipped = 0
+        for msg in batch.messages:
+            try:
+                records.append(record_from_payload(msg))
+            except MissingSendTimestamp:
+                skipped += 1
+        result = await persist_incoming(
+            records,
+            owner_id=owner_id,
+            history_complete=batch.history_complete,
+            gap_blocks_complete=True,
+        )
+        result.skipped += skipped
+        return {
+            "status": "ok",
+            "catchup": "deferred",
+            **result.as_dict(),
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to ingest message batch")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@api.get("/api/sync/cursor")
+async def sync_cursor(
+    platform: str,
+    scope: str,
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, str | bool | None]:
+    """Return the resume watermark for one provider chat."""
+    _verify_api_key(x_api_key)
+    owner_id = _owner_or_503()
+    cursor = await read_cursor(platform, scope, owner_id=owner_id)
+    if cursor is None:
+        return {
+            "platform": platform,
+            "scope": scope,
+            "newest_external_id": None,
+            "newest_at": None,
+            "oldest_at": None,
+            "backfill_complete": False,
+        }
+    return {
+        "platform": platform,
+        "scope": scope,
+        "newest_external_id": cursor.newest_external_id,
+        "newest_at": cursor.newest_at.isoformat() if cursor.newest_at else None,
+        "oldest_at": cursor.oldest_at.isoformat() if cursor.oldest_at else None,
+        "backfill_complete": cursor.backfill_complete,
+    }
+
+
+@api.post("/api/import/telegram")
+async def import_telegram(
+    body: TelegramExportBody,
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, int | str | bool]:
+    """Backfill one Telegram Desktop export.
+
+    The Bot API has no method that returns prior messages. This endpoint
+    is the supported history path for Telegram. Re-posting the same file
+    does not duplicate rows.
+    """
+    _verify_api_key(x_api_key)
+    owner_id = _owner_or_503()
+    records = parse_telegram_export_owned(body.export, owner_from_id=body.owner_from_id)
+    try:
+        result = await persist_incoming(
+            records,
+            owner_id=owner_id,
+            history_complete=True,
+            gap_blocks_complete=True,
+        )
+        return {"status": "ok", "catchup": "deferred", **result.as_dict()}
+    except Exception:
+        logger.exception("Failed to import Telegram export")
         raise HTTPException(status_code=500, detail="Internal server error")

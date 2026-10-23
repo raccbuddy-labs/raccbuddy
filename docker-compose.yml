@@ -85,6 +85,28 @@ services:
       - VOICE_ENABLED=${VOICE_ENABLED:-false}
       - VOICE_REPLY_MODE=${VOICE_REPLY_MODE:-text}
 
+      # IMAP pull connector (optional, off unless IMAP_ENABLED=true)
+      - IMAP_ENABLED=${IMAP_ENABLED:-false}
+      - IMAP_HOST=${IMAP_HOST:-}
+      - IMAP_PORT=${IMAP_PORT:-993}
+      - IMAP_USERNAME=${IMAP_USERNAME:-}
+      - IMAP_PASSWORD=${IMAP_PASSWORD:-}
+      - IMAP_SSL=${IMAP_SSL:-true}
+      - IMAP_OWNER_ADDRESS=${IMAP_OWNER_ADDRESS:-}
+      - IMAP_MAILBOXES=${IMAP_MAILBOXES:-INBOX,Sent}
+      - IMAP_HISTORY_MAX=${IMAP_HISTORY_MAX:-500}
+      - IMAP_SYNC_INTERVAL_SECONDS=${IMAP_SYNC_INTERVAL_SECONDS:-300}
+
+      # Matrix pull connector (optional, unencrypted rooms only)
+      - MATRIX_ENABLED=${MATRIX_ENABLED:-false}
+      - MATRIX_HOMESERVER=${MATRIX_HOMESERVER:-}
+      - MATRIX_ACCESS_TOKEN=${MATRIX_ACCESS_TOKEN:-}
+      - MATRIX_USER_ID=${MATRIX_USER_ID:-}
+      - MATRIX_HISTORY_MAX_PER_ROOM=${MATRIX_HISTORY_MAX_PER_ROOM:-500}
+      - MATRIX_PAGE_SIZE=${MATRIX_PAGE_SIZE:-50}
+      - MATRIX_HISTORY_PAUSE_SECONDS=${MATRIX_HISTORY_PAUSE_SECONDS:-0.2}
+      - MATRIX_SYNC_INTERVAL_SECONDS=${MATRIX_SYNC_INTERVAL_SECONDS:-60}
+
     depends_on:
       db:
         condition: service_healthy
@@ -99,6 +121,9 @@ services:
       - PYTHON_CORE_URL=http://app:8000
       # Must match API_SECRET_KEY set on the app service
       - API_SECRET_KEY=${API_SECRET_KEY:-}
+      - WHATSAPP_HISTORY_ENABLED=${WHATSAPP_HISTORY_ENABLED:-true}
+      - WHATSAPP_HISTORY_MAX_PER_CHAT=${WHATSAPP_HISTORY_MAX_PER_CHAT:-500}
+      - WHATSAPP_HISTORY_PAGE_SIZE=${WHATSAPP_HISTORY_PAGE_SIZE:-100}
     volumes:
       - wa-session:/app/.wwebjs_auth
     depends_on:
