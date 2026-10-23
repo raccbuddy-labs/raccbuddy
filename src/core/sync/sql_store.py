@@ -5,8 +5,10 @@ from __future__ import annotations
 import datetime
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.exc import IntegrityError
+
+from src.core.sync.keys import ensure_utc
 
 from src.core.db.crud import upsert_contact
 from src.core.db.models import Message, SyncCursor
@@ -113,6 +115,72 @@ class SqlMessageStore:
             record.platform,
             record.external_message_id,
         )
+        return existing
+
+    async def find_legacy(self, record: IncomingRecord) -> StoredMessage | None:
+        """Find a pre-sync row with the same text and send second.
+
+        Rows rewritten by the chat-id migration already have
+        ``external_chat_id``. Group rows do not; those match on the contact.
+        """
+        record = await self.resolve_contact(record)
+        second = ensure_utc(record.timestamp).replace(microsecond=0)
+        upper = second + datetime.timedelta(seconds=1)
+        chat_match = Message.external_chat_id == record.external_chat_id
+        alternatives = [chat_match]
+        if record.contact_id is not None:
+            alternatives.append(
+                and_(
+                    Message.external_chat_id.is_(None),
+                    Message.from_contact_id == record.contact_id,
+                )
+            )
+        async with get_session() as session:
+            result = await session.execute(
+                select(Message)
+                .where(
+                    Message.platform == record.platform,
+                    Message.external_message_id.is_(None),
+                    Message.text == record.text,
+                    Message.timestamp >= second,
+                    Message.timestamp < upper,
+                    or_(*alternatives),
+                )
+                .order_by(case((chat_match, 0), else_=1), Message.id)
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            return _to_stored(row) if row is not None else None
+
+    async def adopt_legacy(
+        self,
+        stored: StoredMessage,
+        record: IncomingRecord,
+        chat_id: int,
+    ) -> StoredMessage:
+        """Fill provider ids on a legacy row. The send time is not touched."""
+        async with get_session() as session:
+            result = await session.execute(
+                select(Message).where(Message.id == stored.id)
+            )
+            row = result.scalar_one()
+            row.external_chat_id = record.external_chat_id
+            row.external_message_id = record.external_message_id
+            row.chat_id = chat_id
+            row.is_from_owner = record.is_from_owner
+            if record.is_bot_reply:
+                row.is_bot_reply = True
+            try:
+                await session.commit()
+                await session.refresh(row)
+                return _to_stored(row)
+            except IntegrityError:
+                await session.rollback()
+        existing = await self.get(record.key)
+        if existing is None:
+            raise RuntimeError(
+                f"legacy adopt conflict for {record.platform}/{record.external_message_id}"
+            )
         return existing
 
     async def apply_edit(

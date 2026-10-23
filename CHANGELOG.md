@@ -5,25 +5,36 @@ All notable changes to RaccBuddy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-23
 
 ### Added
 
 - Optional IMAP and Matrix connectors. Both backfill through the shared history ingest (Message-ID / event id, cursors, chunked writes) and stay off unless enabled. Encrypted Matrix rooms are skipped. Signal, Slack, Discord, and iMessage/SMS are documented in `docs/connectors.md` and not implemented.
+- October 2026 codebase review at `docs/analysis/2026-10-codebase-review.md`.
+- HNSW indexes (`vector_cosine_ops`) on `semantic_memories.embedding`, `owner_memories.embedding`, and `summaries.embedding`. Dimensions stay 768.
 - `plugins/example_echo.py` no longer calls `save_message` with arguments that function does not accept. It only logs.
 
 ### Fixed
 
-- CI installs `numpy` so the Bark voice unit tests can build a fake audio buffer. The rest of the voice stack stays in `requirements-voice.txt`.
-- Message ingest no longer keeps only whatever arrived after a connector started. WhatsApp backfills the local history window, Telegram history can be imported from a Desktop `result.json` export (the Bot API cannot return history), and every provider message is stored under a stable id.
-- Re-running a backfill does not insert duplicates. Edits update the existing row and keep the original send time. Reads order by that time, not by ingest time.
-- Bridge chat ids no longer use Python's per-process `hash()`, which split one WhatsApp chat across new ids after every restart.
+- **P0.1 History.** WhatsApp backfills the local history window on ready and checkpoints a per-chat cursor. Telegram history is a Desktop `result.json` import (the Bot API cannot return history). A page that does not reach the cursor is a gap: the bridge widens the fetch, and the core does not mark that backfill complete.
+- **P0.2 Duplicates.** Ingest is idempotent on `(platform, external_chat_id, external_message_id)`. A WhatsApp retry of the same id does not insert a second row. An edit updates the body and `edited_at` and keeps the original send time. Replaying history adopts a pre-sync row with the same text and send second instead of copying it.
+- **P0.3 Chat ids.** Non-Telegram chat ids are a SHA-256 prefix, not Python's per-process `hash()`. Telegram keeps the integer Telegram assigned. Alembic revision `c3d5e7f9a1b2` remaps legacy 1:1 WhatsApp rows whose contact handle is a phone number onto `{number}@c.us`. Group JIDs were never stored and are not guessed.
+- **P0.4 Order.** Synced messages require a provider timestamp. A missing or unparseable timestamp is skipped (batch) or rejected with 422 (single post) instead of being stored as ingest time. Reads order by `(timestamp, external_message_id)`.
+- **P0.5 Owner direction.** WhatsApp `from_me` (and `OWNER_WHATSAPP_NUMBER`) is stored as `is_from_owner`. Frequency, recency, and reply-rate ignore those rows. Adopting a legacy row sets the flag from the replayed payload.
+- **P0.6 Summaries.** The daily job and history catch-up both summarize a UTC day in windows of 40 messages, one embedding per day, with a cap on days and LLM calls. Today's summary is no longer 20 lines clipped to 100 characters, so a backfill that includes today is not frozen as a partial summary.
 - A redelivered Telegram update does not call the model again.
-- Historical catch-up summarizes by day in bounded windows (one embed per day, a cap on LLM calls) instead of one model call per message.
+- CI installs `numpy` so the Bark voice unit tests can build a fake audio buffer. The rest of the voice stack stays in `requirements-voice.txt`.
+
+### Security
+
+- `transformers` is pinned to `>=5.20.2,<6` (voice extra). That clears the remote-code-execution advisory fixed in 5.3.0 and the later advisories fixed in 5.5.0 and 5.10.0.
+- `black` is pinned to `>=26.10.1` (GHSA-3936-cmfr-pm3m and GHSA-cg8m-r9f2-5wm2).
+- `pytest` is pinned to `>=9.0.3,<10` (GHSA-6w46-j5rx-g56g). `pytest-asyncio` moves to `>=1.4.0,<2` so the suite runs on that pytest.
+- The dependency audit also scans `requirements-voice.txt` and `requirements-dev.txt`.
 
 ### Migration
 
-- `alembic upgrade head` (revision `b2c4d6e8f0a1`) adds provider message ids, `sync_cursors`, and timestamp indexes. Pre-upgrade WhatsApp rows used an unstable `chat_id` and are not rewritten. See `docs/sync.md`.
+- `alembic upgrade head`. `b2c4d6e8f0a1` adds provider message ids, `sync_cursors`, and timestamp indexes. `c3d5e7f9a1b2` remaps legacy 1:1 WhatsApp chat ids. `d4e6f8a0b2c3` adds the HNSW indexes (pgvector >= 0.5). See `docs/sync.md`.
 
 ## [0.2.0-beta] - 2026-02-28
 
@@ -226,6 +237,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **0.3.0** (2026-10-23) - History sync, stable chat ids, HNSW embeddings, patched dependencies
 - **0.2.0** (2026-02-27) - Professionalization pass: ContextBuilder, 30k context, API auth, graceful shutdown, cooldown persistence, Docker healthchecks
 - **0.1.0-beta** (2026-02-22) - Initial beta release
 

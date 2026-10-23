@@ -29,7 +29,10 @@ jobs:
         run: pip install pip-audit
 
       - name: Audit dependencies
-        run: pip-audit -r requirements.txt
+        run: |
+          pip-audit -r requirements.txt
+          pip-audit -r requirements-voice.txt
+          pip-audit -r requirements-dev.txt
 
   codeql:
     name: CodeQL Analysis

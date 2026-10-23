@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install linters
-        run: pip install ruff black
+        run: pip install ruff "black==26.10.1"
 
       - name: Ruff check
         run: ruff check .

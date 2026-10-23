@@ -12,15 +12,22 @@ async def persist_incoming(
     *,
     owner_id: int,
     history_complete: bool = False,
+    gap_blocks_complete: bool = False,
 ) -> IngestResult:
     """Persist provider messages for *owner_id*. Safe to call again.
 
     Does not run sentiment, relationship scoring, or embeddings. Live
     handlers that want enrichment do that only for rows this call inserted.
+    ``gap_blocks_complete`` stops a page that misses the cursor from
+    marking the backfill finished.
     """
     store = SqlMessageStore(owner_id)
     service = IngestService(store)
-    return await service.ingest(records, history_complete=history_complete)
+    return await service.ingest(
+        records,
+        history_complete=history_complete,
+        gap_blocks_complete=gap_blocks_complete,
+    )
 
 
 async def read_cursor(platform: str, scope: str, *, owner_id: int):

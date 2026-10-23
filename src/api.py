@@ -23,6 +23,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from src.core.config import settings
+from src import __version__
 from src.core.sync.facade import persist_incoming, read_cursor
 from src.core.sync.keys import ensure_utc, fallback_external_message_id
 from src.core.sync.telegram_export import parse_telegram_export_owned
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_BATCH = 500
 
-api = FastAPI(title="RaccBuddy Core API", version="0.1.0")
+api = FastAPI(title="RaccBuddy Core API", version=__version__)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +122,14 @@ def _owner_or_503() -> int:
     return owner_id
 
 
+class MissingSendTimestamp(ValueError):
+    """The bridge did not send a parseable provider timestamp.
+
+    Substituting ``now()`` would make a backfill look like it happened at
+    ingest time, so ordering would follow arrival order.
+    """
+
+
 def _parse_ts(value: str | None) -> datetime.datetime | None:
     if not value:
         return None
@@ -138,7 +147,12 @@ def record_from_payload(msg: IncomingMessage) -> IncomingRecord:
     integer after every restart. :func:`persist_incoming` hashes with SHA-256
     instead, and Telegram keeps the integer id Telegram assigned.
     """
-    timestamp = _parse_ts(msg.timestamp) or datetime.datetime.now(datetime.UTC)
+    timestamp = _parse_ts(msg.timestamp)
+    if timestamp is None:
+        raise MissingSendTimestamp(
+            "A provider send timestamp is required. "
+            "Refusing to store ingest time as the send time."
+        )
     is_owner = bool(msg.from_me)
     if (
         msg.platform == "whatsapp"
@@ -192,7 +206,15 @@ async def receive_message(
     _verify_api_key(x_api_key)
     owner_id = _owner_or_503()
     try:
-        result = await persist_incoming([record_from_payload(msg)], owner_id=owner_id)
+        try:
+            record = record_from_payload(msg)
+        except MissingSendTimestamp as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        result = await persist_incoming(
+            [record],
+            owner_id=owner_id,
+            gap_blocks_complete=True,
+        )
         logger.info(
             "Ingested %s message from %s (%s)",
             msg.platform,
@@ -225,12 +247,20 @@ async def receive_batch(
             detail=f"Batch limit is {_MAX_BATCH} messages.",
         )
     try:
-        records = [record_from_payload(msg) for msg in batch.messages]
+        records: list[IncomingRecord] = []
+        skipped = 0
+        for msg in batch.messages:
+            try:
+                records.append(record_from_payload(msg))
+            except MissingSendTimestamp:
+                skipped += 1
         result = await persist_incoming(
             records,
             owner_id=owner_id,
             history_complete=batch.history_complete,
+            gap_blocks_complete=True,
         )
+        result.skipped += skipped
         return {
             "status": "ok",
             "catchup": "deferred",
@@ -291,6 +321,7 @@ async def import_telegram(
             records,
             owner_id=owner_id,
             history_complete=True,
+            gap_blocks_complete=True,
         )
         return {"status": "ok", "catchup": "deferred", **result.as_dict()}
     except Exception:

@@ -161,6 +161,15 @@ class SyncCursor(Base):
 
 class Summary(Base):
     __tablename__ = "summaries"
+    __table_args__ = (
+        Index(
+            "ix_summaries_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_where=sa_text("embedding IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contact_id: Mapped[int] = mapped_column(
@@ -378,6 +387,14 @@ OWNER_MEMORY_DEFAULT_IMPORTANCE = 8
 
 class SemanticMemory(Base):
     __tablename__ = "semantic_memories"
+    __table_args__ = (
+        Index(
+            "ix_semantic_memories_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
@@ -455,6 +472,14 @@ class AppLog(Base):
 
 class OwnerMemory(Base):
     __tablename__ = "owner_memories"
+    __table_args__ = (
+        Index(
+            "ix_owner_memories_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)

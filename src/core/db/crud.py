@@ -105,9 +105,13 @@ async def get_messages_since(
     *,
     from_contact_id: int,
     since: datetime.datetime,
-    limit: int = 20,
+    limit: int | None = 20,
 ) -> list[Message]:
-    """Return messages from a contact since a given timestamp."""
+    """Return messages from a contact since a given timestamp.
+
+    ``limit=None`` returns the whole window. The daily summarizer needs
+    that so a backfill is not clipped to the first 20 rows.
+    """
     stmt = (
         select(Message)
         .where(
@@ -119,8 +123,9 @@ async def get_messages_since(
             nullslast(Message.external_message_id),
             Message.id,
         )
-        .limit(limit)
     )
+    if limit is not None:
+        stmt = stmt.limit(limit)
     async with get_session() as session:
         result = await session.execute(stmt)
         return list(result.scalars().all())

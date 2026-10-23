@@ -15,7 +15,7 @@ from src.core.sync.keys import stable_chat_id
 from src.core.sync.memory_store import InMemoryMessageStore
 from src.core.sync.plan import plan_incremental
 from src.core.sync.telegram_export import parse_telegram_export_owned
-from src.core.sync.types import CursorState, IncomingRecord, IngestResult
+from src.core.sync.types import CursorState, IncomingRecord, IngestResult, StoredMessage
 from src.handlers.chat import chat_handler, edited_message_handler
 
 UTC = datetime.UTC
@@ -186,6 +186,127 @@ async def test_cursor_moves_forward_only_and_resume_skips_overlap() -> None:
     assert cursor is not None
     assert cursor.backfill_complete is True
     assert cursor.newest_external_id == "3"
+
+
+@pytest.mark.asyncio
+async def test_gapped_page_does_not_mark_backfill_complete() -> None:
+    """A short page newer than the cursor must not freeze the hole."""
+    store = InMemoryMessageStore()
+    service = IngestService(store)
+    base = datetime.datetime(2026, 6, 1, tzinfo=UTC)
+    await service.ingest(
+        [_rec("old", base, "kept")],
+        history_complete=False,
+        gap_blocks_complete=True,
+    )
+    page = [
+        _rec("n1", base + datetime.timedelta(days=10), "x"),
+        _rec("n2", base + datetime.timedelta(days=11), "y"),
+    ]
+    await service.ingest(page, history_complete=True, gap_blocks_complete=True)
+    cursor = await store.get_cursor("whatsapp", "15551212@c.us")
+    assert cursor is not None
+    assert cursor.backfill_complete is False
+    assert cursor.newest_external_id == "n2"
+
+
+@pytest.mark.asyncio
+async def test_backfill_adopts_legacy_row_instead_of_duplicating() -> None:
+    """Pre-sync rows have no provider id. Replaying history fills that id."""
+    sent = datetime.datetime(2024, 5, 1, 12, 0, tzinfo=UTC)
+    store = InMemoryMessageStore()
+    store.legacy.append(
+        StoredMessage(
+            id=7,
+            platform="whatsapp",
+            external_chat_id="15551212@c.us",
+            external_message_id="",
+            chat_id=111,
+            text="hello",
+            timestamp=sent,
+            is_from_owner=False,
+            contact_id=4,
+        )
+    )
+    service = IngestService(store)
+    result = await service.ingest(
+        [
+            IncomingRecord(
+                platform="whatsapp",
+                external_chat_id="15551212@c.us",
+                external_message_id="true_ABCDEF",
+                text="hello",
+                timestamp=sent,
+                sender_handle="15551212",
+                is_from_owner=True,
+                contact_id=4,
+            )
+        ]
+    )
+    assert result.inserted == 0
+    assert result.updated == 1
+    assert store.legacy == []
+    row = store.list_chat("whatsapp", "15551212@c.us")[0]
+    assert row.external_message_id == "true_ABCDEF"
+    assert row.timestamp == sent
+    assert row.is_from_owner is True
+    assert row.chat_id == stable_chat_id("whatsapp", "15551212@c.us")
+    assert len(store.rows) == 1
+
+    again = await service.ingest(
+        [
+            IncomingRecord(
+                platform="whatsapp",
+                external_chat_id="15551212@c.us",
+                external_message_id="true_ABCDEF",
+                text="hello",
+                timestamp=sent,
+                is_from_owner=True,
+                contact_id=4,
+            )
+        ]
+    )
+    assert again.inserted == 0
+    assert again.duplicates == 1
+    assert len(store.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_adopts_unmapped_group_row_by_contact() -> None:
+    sent = datetime.datetime(2024, 8, 1, 8, 0, tzinfo=UTC)
+    store = InMemoryMessageStore()
+    store.legacy.append(
+        StoredMessage(
+            id=3,
+            platform="whatsapp",
+            external_chat_id="",
+            external_message_id="",
+            chat_id=999,
+            text="in the group",
+            timestamp=sent,
+            contact_id=4,
+        )
+    )
+    service = IngestService(store)
+    result = await service.ingest(
+        [
+            IncomingRecord(
+                platform="whatsapp",
+                external_chat_id="family@g.us",
+                external_message_id="grp1",
+                text="in the group",
+                timestamp=sent,
+                contact_id=4,
+                is_from_owner=False,
+            )
+        ]
+    )
+    assert result.inserted == 0
+    assert result.updated == 1
+    row = store.rows[("whatsapp", "family@g.us", "grp1")]
+    assert row.chat_id == stable_chat_id("whatsapp", "family@g.us")
+    assert row.timestamp == sent
+    assert store.legacy == []
 
 
 def test_incremental_plan_flags_a_gap_when_the_page_misses_the_cursor() -> None:

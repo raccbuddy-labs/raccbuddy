@@ -57,6 +57,9 @@ Limits:
   missing until the phone has synced them into the Web client.
 - Default cap is `WHATSAPP_HISTORY_MAX_PER_CHAT` (500). The recent page
   after a finished backfill is `WHATSAPP_HISTORY_PAGE_SIZE` (100).
+- A page that does not overlap the stored cursor is a gap. The bridge
+  fetches the larger cap once, and the core refuses to mark that backfill
+  complete, so the missing messages are still requested on the next run.
 - Set `WHATSAPP_HISTORY_ENABLED=false` to keep live-only behavior.
 - Status broadcasts are skipped. Group chats are stored as sent; relationship
   scoring still treats the sender as a contact. Leave groups out of the
@@ -113,10 +116,15 @@ index ignores nulls. `is_from_owner` defaults to false, so old scores do
 not change until new owner-side messages arrive.
 
 WhatsApp chats ingested before this change used a per-process `hash()` as
-`chat_id`. Those integers cannot be reconstructed. New WhatsApp messages
-use the stable id, so a pre-upgrade WhatsApp thread and its post-upgrade
-messages will not share `chat_id`. Telegram integer ids are unchanged.
-There is no automatic rewrite of the old WhatsApp rows.
+`chat_id`. That integer cannot be recomputed. Revision `c3d5e7f9a1b2`
+rewrites a chat when every legacy row on that id belongs to one phone
+number: `chat_id` becomes the SHA-256 id of `{number}@c.us`, and
+`external_chat_id` is set to that JID. Salted shards of the same 1:1 chat
+therefore merge. Group chats named more than one contact, and the group
+JID was never stored, so those rows are not guessed. Replaying history
+adopts a legacy row (same text and send second) instead of inserting a
+second copy, and sets `is_from_owner` from the new payload. Telegram
+integer ids are unchanged. Downgrade cannot restore the salted ids.
 
 ## IMAP and Matrix
 

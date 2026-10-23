@@ -89,9 +89,21 @@ async function syncHistory(client, deps) {
 async function syncChat(client, chat, scope, limits, deps) {
   const cursor = await deps.fetchCursor(scope);
   let limit = fetchLimit(cursor, limits);
-  // One expansion pass when the newest page does not overlap the cursor.
+  // One expansion pass when the page does not overlap the cursor.
   for (let attempt = 0; attempt < 2; attempt++) {
     const raw = await chat.fetchMessages({ limit });
+    const payloads = [];
+    for (const msg of raw) {
+      const base = messagePayload(msg, chat);
+      if (base) payloads.push(base);
+    }
+    const decision = historyDecision(
+      payloads,
+      cursor,
+      raw.length,
+      limit,
+      limits.maxPerChat
+    );
     const messages = [];
     for (const msg of raw) {
       const base = messagePayload(msg, chat);
@@ -103,25 +115,43 @@ async function syncChat(client, chat, scope, limits, deps) {
         contact_name: contact.name,
       });
     }
-    const complete = raw.length < limit;
-    await deps.forwardBatch(messages, { historyComplete: complete });
-    if (!cursor || complete || limit >= limits.maxPerChat) return;
-    const oldest = oldestTimestamp(messages);
-    if (oldest && cursor.newest_at && oldest <= Date.parse(cursor.newest_at)) {
-      return;
-    }
+    await deps.forwardBatch(messages, { historyComplete: decision.complete });
+    if (!decision.expand) return;
     limit = limits.maxPerChat;
   }
 }
 
-function oldestTimestamp(messages) {
-  let oldest = null;
+/**
+ * True when this page overlaps the stored watermark.
+ *
+ * A page of only-newer messages has a hole between the cursor and the
+ * oldest row. An empty payload has nothing to miss.
+ */
+function pageReachesCursor(messages, cursor) {
+  if (!cursor || !cursor.newest_at) return true;
+  const watermark = Date.parse(cursor.newest_at);
+  if (!Number.isFinite(watermark)) return true;
+  if (!messages.length) return true;
+  const known = cursor.newest_external_id;
   for (const msg of messages) {
+    if (known && msg.external_message_id === known) return true;
     const ts = Date.parse(msg.timestamp);
-    if (Number.isNaN(ts)) continue;
-    if (oldest === null || ts < oldest) oldest = ts;
+    if (!Number.isNaN(ts) && ts <= watermark) return true;
   }
-  return oldest;
+  return false;
+}
+
+/**
+ * Decide whether this fetch finished history and whether to ask again
+ * with a larger limit. A short page that misses the cursor is not complete.
+ */
+function historyDecision(messages, cursor, rawCount, limit, maxPerChat) {
+  const exhausted = rawCount < limit;
+  const reached = pageReachesCursor(messages, cursor);
+  const complete = exhausted && reached;
+  const expand =
+    Boolean(cursor && cursor.newest_at) && !reached && limit < maxPerChat;
+  return { complete, expand, reached };
 }
 
 async function describeContact(msg, chat) {
@@ -152,7 +182,9 @@ function sleep(ms) {
 
 module.exports = {
   fetchLimit,
+  historyDecision,
   historyLimits,
   messagePayload,
+  pageReachesCursor,
   syncHistory,
 };

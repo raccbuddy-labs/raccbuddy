@@ -43,6 +43,19 @@ class MessageStore(Protocol):
         """Update body and edit time. Leave the original timestamp."""
         ...
 
+    async def find_legacy(self, record: IncomingRecord) -> StoredMessage | None:
+        """A pre-sync row with the same text and send time, if one exists."""
+        ...
+
+    async def adopt_legacy(
+        self,
+        stored: StoredMessage,
+        record: IncomingRecord,
+        chat_id: int,
+    ) -> StoredMessage:
+        """Attach provider ids to a legacy row. Keep the original timestamp."""
+        ...
+
     async def get_cursor(self, platform: str, scope: str) -> CursorState | None:
         """Return the watermark for this chat, if one has been stored."""
         ...
@@ -118,6 +131,28 @@ def _merge(prev: IncomingRecord, rec: IncomingRecord) -> IncomingRecord:
     )
 
 
+def _page_reaches_watermark(
+    group: list[IncomingRecord],
+    current: CursorState | None,
+) -> bool:
+    """True when this page overlaps the stored newest message.
+
+    No watermark means there is nothing to miss. A page of only-newer
+    messages, or a page whose oldest timestamp is still after the
+    watermark, has a hole in front of the cursor.
+    """
+    if current is None or current.newest_at is None:
+        return True
+    watermark = ensure_utc(current.newest_at)
+    known = current.newest_external_id
+    for rec in group:
+        if known and rec.external_message_id == known:
+            return True
+        if ensure_utc(rec.timestamp) <= watermark:
+            return True
+    return False
+
+
 def decide(existing: StoredMessage | None, incoming: IncomingRecord) -> str:
     """Return ``insert``, ``edit``, or ``duplicate``."""
     if existing is None:
@@ -139,6 +174,7 @@ class IngestService:
         *,
         chat_id_for: dict[tuple[str, str], int] | None = None,
         history_complete: bool = False,
+        gap_blocks_complete: bool = False,
     ) -> IngestResult:
         """Insert, edit, or drop each record. Advance per-chat cursors.
 
@@ -175,8 +211,15 @@ class IngestService:
                     chat_id = chat_id_for.get((rec.platform, rec.external_chat_id))
                 if chat_id is None:
                     chat_id = stable_chat_id(rec.platform, rec.external_chat_id)
-                await self.store.add(rec, chat_id)
-                result.inserted += 1
+                legacy = await self.store.find_legacy(rec)
+                if legacy is not None:
+                    # A row written before provider ids existed. Attach the
+                    # id instead of inserting a second copy of the same text.
+                    await self.store.adopt_legacy(legacy, rec, chat_id)
+                    result.updated += 1
+                else:
+                    await self.store.add(rec, chat_id)
+                    result.inserted += 1
             elif action == "edit" and existing is not None:
                 edited_at = rec.edited_at or datetime.datetime.now(datetime.UTC)
                 await self.store.apply_edit(
@@ -195,6 +238,7 @@ class IngestService:
                 scope,
                 group,
                 history_complete=history_complete,
+                gap_blocks_complete=gap_blocks_complete,
             )
         return result
 
@@ -205,8 +249,15 @@ class IngestService:
         group: list[IncomingRecord],
         *,
         history_complete: bool,
+        gap_blocks_complete: bool,
     ) -> None:
-        """Move the watermark forward. Never backward."""
+        """Move the watermark forward. Never backward.
+
+        When *gap_blocks_complete* is set, a page that does not reach the
+        stored watermark cannot mark the backfill finished. A short
+        WhatsApp page used to do that and then never ask for the missing
+        messages again.
+        """
         current = await self.store.get_cursor(platform, scope)
         newest = max(group, key=lambda rec: (rec.timestamp, rec.external_message_id))
         oldest = min(group, key=lambda rec: (rec.timestamp, rec.external_message_id))
@@ -224,6 +275,12 @@ class IngestService:
             if current.oldest_at is not None and current.oldest_at < oldest_at:
                 oldest_at = current.oldest_at
             complete = current.backfill_complete or history_complete
+        if (
+            gap_blocks_complete
+            and history_complete
+            and not _page_reaches_watermark(group, current)
+        ):
+            complete = False
         await self.store.put_cursor(
             CursorState(
                 platform=platform,

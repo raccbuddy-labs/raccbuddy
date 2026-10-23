@@ -47,6 +47,6 @@ filterwarnings = [
 
 [dependency-groups]
 dev = [
-    "black>=26.1.0",
+    "black>=26.10.1",
     "ruff>=0.15.4",
 ]
